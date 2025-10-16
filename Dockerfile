@@ -1,11 +1,11 @@
-# 单阶段：构建 + 运行都在同一个镜像里（简单但体积较大）
-FROM 10.29.230.150:31381/library/m.daocloud.io/docker.io/rockylinux/rockylinux:9.6.20250531
+# ====== Build Stage ======
+FROM 10.29.230.150:31381/library/m.daocloud.io/docker.io/rockylinux/rockylinux:9.6.20250531 AS builder
 
-# 基础工具 + OpenJDK 1.8 + Maven
+# 基础工具 + OpenJDK 17 + Maven
 RUN dnf clean all && \
     dnf -y --nobest --allowerasing update && \
     dnf -y --nobest --allowerasing install \
-      java-1.8.0-openjdk-devel maven tzdata git which tar gzip && \
+      java-17-openjdk-devel maven tzdata git which tar gzip && \
     dnf clean all
 
 # 时区
@@ -14,15 +14,34 @@ RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
 WORKDIR /app
 
-# 先拷 POM 利用依赖缓存
+# 先拷 POM 以利用依赖缓存
 COPY pom.xml ./
 RUN mvn -B -U -q -DskipTests=true dependency:go-offline
 
-# 再拷源码并打包
+# 再拷源码
 COPY src ./src
+
+# 打包（生成 target/*.jar）
 RUN mvn -B -U -DskipTests=true clean package
 
-EXPOSE 8080
+# ====== Runtime Stage ======
+FROM 10.29.230.150:31381/library/m.daocloud.io/docker.io/rockylinux/rockylinux:9.6.20250531
 
-# 直接运行 target 产物；用 sh -c 允许通配符匹配 jar 名
-ENTRYPOINT ["sh","-c","exec java -jar /app/target/*.jar"]
+# 仅安装运行所需的 JRE（headless 更轻）
+RUN dnf clean all && \
+    dnf -y --nobest --allowerasing update && \
+    dnf -y --nobest --allowerasing install \
+      java-17-openjdk-headless tzdata && \
+    dnf clean all
+
+ENV TZ=Asia/Shanghai
+RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+
+WORKDIR /app
+
+# 允许外部以构建参数覆写 Jar 路径（默认匹配单个可执行 JAR）
+ARG JAR_PATH=/app/target/*-SNAPSHOT.jar
+COPY --from=builder ${JAR_PATH} /app/app.jar
+
+EXPOSE 8080
+ENTRYPOINT ["java","-jar","/app/app.jar"]
